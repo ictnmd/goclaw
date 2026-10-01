@@ -1,11 +1,17 @@
-# GoClaw full local stack: gateway + PostgreSQL/pgvector + headless Chrome.
+# GoClaw full local stack: gateway + PostgreSQL/pgvector + Redis + headless Chrome.
 #
 # Usage:
 #   docker compose -f docker-compose.stack.yml up -d --build
 #
 # Dashboard/API: http://localhost:18790
 # PostgreSQL:    localhost:${POSTGRES_PORT:-5432}
+# Redis:         localhost:${REDIS_PORT:-6379}
 # Chrome CDP:    localhost:${CHROME_CDP_PORT:-9222}
+#
+# Redis caching is compiled in via the ENABLE_REDIS build arg — it only takes
+# effect when the image is built locally (`--build`). The published :latest-full
+# image has no redis build tag, and GOCLAW_REDIS_DSN is then ignored (in-memory
+# cache). If Redis is unreachable the gateway also falls back to in-memory.
 #
 # Set GOCLAW_GATEWAY_TOKEN in .env before starting. POSTGRES_PASSWORD defaults
 # to "goclaw" for local development.
@@ -26,6 +32,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    networks:
+      - goclaw-net
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
     networks:
       - goclaw-net
@@ -62,6 +84,7 @@ services:
       dockerfile: Dockerfile
       args:
         ENABLE_OTEL: "${ENABLE_OTEL:-false}"
+        ENABLE_REDIS: "${ENABLE_REDIS:-true}"
         ENABLE_EMBEDUI: "${ENABLE_EMBEDUI:-true}"
         ENABLE_PYTHON: "${ENABLE_PYTHON:-true}"
         ENABLE_FULL_SKILLS: "${ENABLE_FULL_SKILLS:-true}"
@@ -78,6 +101,7 @@ services:
       GOCLAW_ENCRYPTION_KEY: ${GOCLAW_ENCRYPTION_KEY:-}
       GOCLAW_SKILLS_DIR: /app/data/skills
       GOCLAW_POSTGRES_DSN: postgres://${POSTGRES_USER:-goclaw}:${POSTGRES_PASSWORD:-goclaw}@postgres:5432/${POSTGRES_DB:-goclaw}?sslmode=disable
+      GOCLAW_REDIS_DSN: ${GOCLAW_REDIS_DSN:-redis://redis:6379/0}
       GOCLAW_BROWSER_REMOTE_URL: ws://chrome:9222
       GOCLAW_TRACE_VERBOSE: "${GOCLAW_TRACE_VERBOSE:-0}"
     ports:
@@ -109,6 +133,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       chrome:
         condition: service_healthy
     restart: unless-stopped
@@ -117,6 +143,7 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:
   goclaw-data:
   goclaw-workspace:
   goclaw-skills:
