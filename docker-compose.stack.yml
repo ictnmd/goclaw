@@ -1,0 +1,128 @@
+# GoClaw full local stack: gateway + PostgreSQL/pgvector + headless Chrome.
+#
+# Usage:
+#   docker compose -f docker-compose.stack.yml up -d --build
+#
+# Dashboard/API: http://localhost:18790
+# PostgreSQL:    localhost:${POSTGRES_PORT:-5432}
+# Chrome CDP:    localhost:${CHROME_CDP_PORT:-9222}
+#
+# Set GOCLAW_GATEWAY_TOKEN in .env before starting. POSTGRES_PASSWORD defaults
+# to "goclaw" for local development.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-goclaw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goclaw}
+      POSTGRES_DB: ${POSTGRES_DB:-goclaw}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-goclaw} -d ${POSTGRES_DB:-goclaw}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - goclaw-net
+
+  chrome:
+    image: chromedp/headless-shell:latest
+    command:
+      - --no-sandbox
+      - --headless=new
+      - --remote-allow-origins=*
+      - --disable-gpu
+      - --disable-dev-shm-usage
+    ports:
+      - "${CHROME_CDP_PORT:-9222}:9222"
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+    restart: unless-stopped
+    networks:
+      - goclaw-net
+
+  goclaw:
+    image: ghcr.io/nextlevelbuilder/goclaw:latest-full
+    build:
+      context: ${GOCLAW_DIR:-.}
+      dockerfile: Dockerfile
+      args:
+        ENABLE_OTEL: "${ENABLE_OTEL:-false}"
+        ENABLE_EMBEDUI: "${ENABLE_EMBEDUI:-true}"
+        ENABLE_PYTHON: "${ENABLE_PYTHON:-true}"
+        ENABLE_FULL_SKILLS: "${ENABLE_FULL_SKILLS:-true}"
+        VERSION: "${GOCLAW_VERSION:-dev}"
+        COMMIT_SHA: "${GOCLAW_COMMIT_SHA:-}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GOCLAW_HOST: 0.0.0.0
+      GOCLAW_PORT: 18790
+      GOCLAW_CONFIG: /app/data/config.json
+      GOCLAW_GATEWAY_TOKEN: ${GOCLAW_GATEWAY_TOKEN:?set GOCLAW_GATEWAY_TOKEN in .env}
+      GOCLAW_ENCRYPTION_KEY: ${GOCLAW_ENCRYPTION_KEY:-}
+      GOCLAW_SKILLS_DIR: /app/data/skills
+      GOCLAW_POSTGRES_DSN: postgres://${POSTGRES_USER:-goclaw}:${POSTGRES_PASSWORD:-goclaw}@postgres:5432/${POSTGRES_DB:-goclaw}?sslmode=disable
+      GOCLAW_BROWSER_REMOTE_URL: ws://chrome:9222
+      GOCLAW_TRACE_VERBOSE: "${GOCLAW_TRACE_VERBOSE:-0}"
+    ports:
+      - "${GOCLAW_PORT:-18790}:18790"
+    volumes:
+      - goclaw-data:/app/data
+      - goclaw-workspace:/app/workspace
+      - goclaw-skills:/app/skills
+      - goclaw-workspace-state:/app/.goclaw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+          pids: 200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chrome:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - goclaw-net
+
+volumes:
+  postgres-data:
+  goclaw-data:
+  goclaw-workspace:
+  goclaw-skills:
+  goclaw-workspace-state:
+
+networks:
+  goclaw-net:
+    name: goclaw-net
+    driver: bridge
